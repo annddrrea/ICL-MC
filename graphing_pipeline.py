@@ -40,7 +40,7 @@ def pos_encode_graph(model_history, datem, config, points = [5,100,199]):
     fig = plt.figure(figsize=(8, 3))  # Adjust the size as needed
     gs = gridspec.GridSpec(1, 2, width_ratios=[1, 1])
     ax0 = plt.subplot(gs[0])
-    labels = ["uniform", "unigram", "bigram", "trigram", "tetragram", "pentagram"]
+    labels = ["uniform", "unigram", "bigram", "trigram", "tetragram"] + [f"{n}-gram" for n in range(5, 20)]
     for i in range(1,len(data[1])):
         dats = [data[1][i] for dat in datem]
         data_to_line(dats, len(data[0]), labels[i], ax0, colors[i])
@@ -166,10 +166,10 @@ def test_loss(datem, config, axis = None):
     if axis is None:
         fig = plt.figure(figsize=(5,3))
         axis = fig.add_subplot(111)
-    labels = ["Uniform", "Unigram", "Bigram", "Trigram", "Tetragram"]
+    labels = ["Uniform", "Unigram", "Bigram", "Trigram", "Tetragram"] + [f"{n}-gram" for n in range(5, 20)]
     styles = ["-", "--", "-.", ":", "-"]
     for i in range(1, config.n + 1):
-        data_to_line([datem[-1][1][i]], len(datem[-1][0]), labels[i], axis, colors[i], style = styles[i])
+        data_to_line([datem[-1][1][i]], len(datem[-1][0]), labels[i], axis, colors[i])
     for data in datem:
         axis.plot(data[0].numpy())#, color = colors[0])
         # axis.plot([data[1][1].numpy()]* len(data[0]), color=colors[i])

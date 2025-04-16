@@ -1,11 +1,12 @@
 import torch
 import numpy as np
-from utils import stationary_distribution
+from utils import stationary_distribution, approx_stationary_distribution
 from torch.utils.data import Dataset
 from random import choices, seed, Random, sample, random
 import pickle
 from hashlib import sha3_256
-
+import random
+import os
 
         
 
@@ -19,7 +20,7 @@ class ngrams(Dataset):
     Dataset for the in context markov learning. Each example is a series of outputs from a markov chain
     """
 
-    def __init__(self, split:str, n:int, length = 101, num_symbols = 2, size = 1000, last_token_only = False, device = 'cpu', offline=False):
+    def __init__(self, split:str, n:int, length = 101, num_symbols = 2, size = 1000, last_token_only = False, device = 'cpu', offline=False, cache_dir='train_transition', sequential=False):
         self.length = length
         self.num_symbols = num_symbols
         self.split = split
@@ -29,6 +30,7 @@ class ngrams(Dataset):
         self.last_token_only = last_token_only
         self.device = device
         self.n = n - 1
+        self.sequential = sequential
         self.transition_matrix_gen = torch.distributions.dirichlet.Dirichlet(torch.ones((num_symbols**(n-1),num_symbols), device = device)).sample # creates a zero tensor temp with shape (..., num_contexts, num_symbols)
         
         # Compute powers of num_symbols
@@ -36,7 +38,34 @@ class ngrams(Dataset):
 
         self.conv = torch.tensor([num_symbols ** k for k in range(self.n)])
 
+
+        self.cache_dir = f'{split}_transition_size={size}'
+        self.cache_file = f"{self.cache_dir}/transitions_n{n}_s{num_symbols}.pt"
         
+        # Create cache directory if it doesn't exist
+        os.makedirs(self.cache_dir, exist_ok=True)
+        
+        # Load or generate transition matrices
+        if os.path.exists(self.cache_file):
+            print(f"Loading cached transition matrices from {self.cache_file}")
+            self.transition_matrices = torch.load(self.cache_file)
+        else:
+            print(f"Generating and caching transition matrices to {self.cache_file}")
+            self.transition_matrices = self._generate_transition_matrices(size)
+            torch.save(self.transition_matrices, self.cache_file)
+
+    def _generate_transition_matrices(self, size):
+        """Generate all transition matrices upfront"""
+        print("Generating transition matrices...")
+        matrices = []
+        batch_size = 1000  # Process in batches to manage memory
+        
+        for i in range(0, size, batch_size):
+            current_batch = min(batch_size, size - i)
+            matrices.append(self.transition_matrix_gen([current_batch]))
+        
+        return torch.cat(matrices, dim=0)
+
     def __len__(self):
         return self.size
 
@@ -58,14 +87,18 @@ class ngrams(Dataset):
         else:
             return stationary_distribution(transition_matrices)
 
-    def __getitem__(self, _):
-        transition_matrix = self.transition_matrix_gen([1])
-        stationary = self.stationary_distribution(transition_matrix)
+    def __getitem__(self, idx):
+        if self.sequential:
+            transition_matrix = self.transition_matrix_gen([1])
+        else:
+            transition_matrix = self.transition_matrices[idx]
+        # stationary = self.stationary_distribution(transition_matrix)
         output = torch.zeros(self.length, dtype=torch.long, device=self.device)
 
         # Sample one initial state
-        initial_idx = torch.multinomial(stationary.squeeze(0), 1).item()
-        output[:self.n] = self.single_symbol_convert(torch.tensor([initial_idx]))[0]
+        # initial_idx = torch.multinomial(stationary.squeeze(0), 1).item()
+        # output[:self.n] = self.single_symbol_convert(torch.tensor([initial_idx]))[0]
+        output[:self.n] = torch.randint(0, self.num_symbols, (self.n,), device=self.device)
 
 
         # No batch offset needed
@@ -97,12 +130,16 @@ class ngrams(Dataset):
 
 
     def __getitems__(self, indices):
-        transition_matrices = self.transition_matrix_gen([len(indices)])
-        stationary_distributions = self.stationary_distribution(transition_matrices)
+        if self.sequential:
+            transition_matrices = self.transition_matrix_gen([len(indices)])
+        else:
+            transition_matrices = self.transition_matrices[indices]
+        # stationary_distributions = self.stationary_distribution(transition_matrices)
 
         #generate sequence
         output = torch.zeros((len(transition_matrices), self.length), dtype=torch.long, device = self.device)
-        output[:, :self.n] =self.single_symbol_convert(torch.multinomial(stationary_distributions, 1).squeeze())
+        # output[:, :self.n] =self.single_symbol_convert(torch.multinomial(stationary_distributions, 1).squeeze())
+        output[:, :self.n] = torch.randint(0, self.num_symbols, (len(transition_matrices), self.n), device=self.device)
         cons = torch.arange(len(transition_matrices), device = self.device) * self.num_symbols ** self.n
         for ind in range(self.n, self.length):
             if self.n == 1:
@@ -222,30 +259,9 @@ class unigram(ngrams):
         probs = self.dirichlet(sample_shape)
 
         return probs.unsqueeze(-2).expand(sample_shape+torch.Size([self.num_symbols, self.num_symbols]))
-
-
-
-class mixture(Dataset):
-    def __init__(self, db1, db2, p):
-        self.db1 = db1
-        self.db2 = db2
-        self.p = p
-
-    def __len__(self):
-        return min(self.db1.__len__(), self.db2.__len__())
-    
-    def __getitem__(self, idx):
-        if random() < self.p:
-            # print(f"get item from n = {self.db1.n}")
-            self.n = self.db1.n
-            return self.db1.__getitem__(idx)
-        else:
-            # print(f"get item from n = {self.db2.n}")
-            self.n = self.db2.n
-            return self.db2.__getitem__(idx)
         
 
-class mixture2(Dataset):
+class mixture_sequential(Dataset):
     def __init__(self, dblist : list, plist : list):
         self.dblist = dblist
         self.plist = plist
@@ -256,6 +272,79 @@ class mixture2(Dataset):
     def __getitem__(self, idx):
         # randomly select a db according to plist
         db = choices(self.dblist, self.plist)[0]
-        # print(f"get item from n = {db.n}")
         self.n = db.n
         return db.__getitem__(idx)
+
+class mixture_parallel(Dataset):
+    def __init__(self, dblist: list, plist: list, batch_size: int = 1024, num_workers: int = 8):
+        """
+        Args:
+            dblist: List of ngram datasets
+            plist: List of probabilities for each dataset
+            batch_size: Size of batches for parallel generation
+        """
+        self.dblist = dblist
+        self.plist = plist
+        self.batch_size = batch_size
+        
+        # Calculate how many sequences to generate from each dataset
+        self.total_size = min(db.__len__() for db in dblist)
+        self.sequence_counts = [int(self.total_size * p) for p in plist]
+        
+        # Adjust counts to ensure they sum to total_size
+        diff = self.total_size - sum(self.sequence_counts)
+        if diff > 0:
+            self.sequence_counts[0] += diff  # Add remaining to first dataset
+        
+        # Pre-generate indices for each dataset
+        self.indices = []
+        for i, count in enumerate(self.sequence_counts):
+            self.indices.extend([(i, j) for j in range(count)])
+        
+        # Shuffle the indices
+        random.shuffle(self.indices)
+        
+        # Pre-generate sequences in batches
+        self.sequences = []
+        for i in range(0, len(self.indices), batch_size):
+            batch_indices = self.indices[i:i+batch_size]
+            batch_sequences = self._generate_batch(batch_indices)
+            self.sequences.extend(batch_sequences)
+        
+        # Shuffle the sequences
+        random.shuffle(self.sequences)
+
+        # Create a pool of workers for parallel processing
+        self.sequences = []
+        for i in range(0, len(self.indices), batch_size):
+            batch_indices = self.indices[i:i+batch_size]
+            batch_sequences = self._generate_batch(batch_indices)
+            self.sequences.extend(batch_sequences)
+
+    def _generate_batch(self, batch_indices):
+        """Generate a batch of sequences in parallel"""
+        # Group indices by dataset
+        dataset_indices = {}
+        for idx, (db_idx, seq_idx) in enumerate(batch_indices):
+            if db_idx not in dataset_indices:
+                dataset_indices[db_idx] = []
+            dataset_indices[db_idx].append(seq_idx)
+        
+        # Generate sequences for each dataset in parallel
+        all_sequences = []
+        for db_idx, indices in dataset_indices.items():
+            db = self.dblist[db_idx]
+            # Use __getitems__ for parallel generation
+            sequences = db.__getitems__(indices)
+            all_sequences.extend(sequences)
+        
+        return all_sequences
+
+    def __len__(self):
+        return self.total_size
+
+    def __getitem__(self, idx):
+        return self.sequences[idx]
+    
+    def __getitems__(self, indices):
+        return [self.sequences[i] for i in indices]

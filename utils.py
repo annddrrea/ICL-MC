@@ -3,6 +3,7 @@ import torch
 from torch.utils.data import DataLoader
 import torch.nn.functional as F
 import math
+import sys
 
 def stationary_distribution(P):
     if len(P.shape) == 2:
@@ -36,6 +37,45 @@ def stationary_distribution(P):
           exit()
     pi = torch.matmul(pi_next, P).squeeze()
     return pi / pi.sum(axis=-1, keepdim=True)
+
+def approx_stationary_distribution(P, n=100, num_symbols=2, num_samples=10000, device='cpu'):
+    """
+    Optimized stationary distribution calculation for large n
+    P: transition matrix of shape (num_symbols, num_symbols)
+    """
+    # For n=100, we don't need the full transition matrix
+    # We can work with a sliding window of the last k states
+    window_size = 10  # Adjust based on memory constraints
+    
+    # Initialize counts
+    counts = torch.zeros(num_symbols, device=device)
+    
+    # Generate sequences in batches for efficiency
+    batch_size = 1000
+    num_batches = (num_samples + batch_size - 1) // batch_size
+    
+    for _ in range(num_batches):
+        # Generate batch of sequences
+        current_batch_size = min(batch_size, num_samples - _ * batch_size)
+        
+        # Start with random initial states
+        current_states = torch.randint(0, num_symbols, (current_batch_size,), device=device)
+        sequences = current_states.unsqueeze(1)
+        
+        # Generate sequences using matrix multiplication for efficiency
+        for _ in range(n-1):
+            # Get transition probabilities for all current states at once
+            probs = P[current_states]
+            # Sample next states
+            current_states = torch.multinomial(probs, 1).squeeze()
+            sequences = torch.cat([sequences, current_states.unsqueeze(1)], dim=1)
+        
+        # Count final states
+        final_states = sequences[:, -1]
+        counts += torch.bincount(final_states, minlength=num_symbols)
+    
+    # Normalize to get probabilities
+    return counts / num_samples
 
 def mean_alg(inp, num_symbols):
   return (torch.bincount(inp, minlength = num_symbols)+1)/(len(inp)+num_symbols)

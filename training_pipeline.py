@@ -50,12 +50,12 @@ def train(config=get_default_config()):
     set_seed(config.seed)
     config.device = device
     if config.dataset is None:
-        print("Using ngrams dataset")
+        print("No dataset is given, using ngrams dataset")
         train_dataset = datasets.ngrams('train', config.n, config.block_size+1, config.vocab_size)
     else:
         train_dataset = config.dataset
 
-    train_config = Trainer.get_default_config()
+    train_config = Trainer.get_default_config() # set default training parameters
     train_config.max_iters = config.max_iters
     train_config.num_workers = config.num_workers
     train_config.batch_size = config.batch_size
@@ -78,12 +78,15 @@ def train(config=get_default_config()):
         model = min_model(config)
         
 
-    trainer = Trainer(train_config, model, train_dataset)
+    trainer = Trainer(train_config, model, train_dataset) # Creates a Trainer object to run the training loop
+
+    # Saves the initial model snapshot before training
 
     model_history = [deepcopy(model)]
     train_loss = []
+    # print training progress every 1/5th of total iterations
     wait = max(train_config.max_iters// 5, 1)
-    num_models = 200 # number of models saved (assuming number of iterations is atleast as high)
+    num_models = 200 # number of models saved (assuming number of iterations is at least as high)
     if 'minimal model' in name and "wise" in name:
         model.Wq.requires_grad_(False)
         model.v.requires_grad_(False)
@@ -91,11 +94,15 @@ def train(config=get_default_config()):
     def batch_end_callback(trainer):
         # trainer.optimizer.param_groups[0]['lr'] = 2e-1
         train_loss.append(trainer.loss.item())
-        if trainer.iter_num % max(train_config.max_iters//num_models, 1) == 0:
+        if trainer.iter_num % max(train_config.max_iters//num_models, 1) == 0: # time to save model
             model_history.append(deepcopy(model))
             # torch.save(model.state_dict(), os.path.join(path, 'checkpoints', f'model_{trainer.iter_num}'))
-        if trainer.iter_num % wait == 0:
+        if trainer.iter_num % wait == 0: # time to print training progress
             print(f"iter_dt {trainer.iter_dt *1000:.2f} ms; iter {trainer.iter_num}: train loss {trainer.loss.item():f}")
+        # calculate test loss
     trainer.set_callback('on_batch_end', batch_end_callback)
     trainer.run()
+    
+
     return model_history, train_loss
+    
